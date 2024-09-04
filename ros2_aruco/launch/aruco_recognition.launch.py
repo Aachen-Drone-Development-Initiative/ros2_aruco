@@ -14,7 +14,10 @@ def generate_launch_description():
     aruco_node = Node(
         package='ros2_aruco',
         executable='aruco_node',
-        parameters=[aruco_params]
+        parameters=[aruco_params],
+        remappings=[
+        ('image_raw', '/rgbd_camera/image'),
+        ],
     )
 
     return LaunchDescription([

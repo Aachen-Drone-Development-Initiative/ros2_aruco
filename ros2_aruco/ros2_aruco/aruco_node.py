@@ -27,6 +27,7 @@ Version: 10/26/2020
 
 """
 
+
 import rclpy
 import rclpy.node
 from rclpy.qos import qos_profile_sensor_data
@@ -40,6 +41,32 @@ from geometry_msgs.msg import PoseArray, Pose
 from ros2_aruco_interfaces.msg import ArucoMarkers
 from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
+# Original function does not exist anymore since 4.7
+# Source: https://stackoverflow.com/questions/75750177/solve-pnp-or-estimate-pose-single-markers-which-is-better/75871586#75871586
+def my_estimatePoseSingleMarkers(corners, marker_size, mtx, distortion):
+    '''
+    This will estimate the rvec and tvec for each of the marker corners detected by:
+       corners, ids, rejectedImgPoints = detector.detectMarkers(image)
+    corners - is an array of detected corners for each detected marker in the image
+    marker_size - is the size of the detected markers
+    mtx - is the camera matrix
+    distortion - is the camera distortion matrix
+    RETURN list of rvecs, tvecs, and trash (so that it corresponds to the old estimatePoseSingleMarkers())
+    '''
+    marker_points = np.array([[-marker_size / 2, marker_size / 2, 0],
+                              [marker_size / 2, marker_size / 2, 0],
+                              [marker_size / 2, -marker_size / 2, 0],
+                              [-marker_size / 2, -marker_size / 2, 0]], dtype=np.float32)
+    trash = []
+    rvecs = []
+    tvecs = []
+    
+    for c in corners:
+        nada, R, t = cv2.solvePnP(marker_points, c, mtx, distortion, False, cv2.SOLVEPNP_IPPE_SQUARE)
+        rvecs.append(R)
+        tvecs.append(t)
+        trash.append(nada)
+    return np.array([rvecs]), np.array([tvecs]), trash
 
 class ArucoNode(rclpy.node.Node):
     def __init__(self):
@@ -103,6 +130,7 @@ class ArucoNode(rclpy.node.Node):
 
         image_topic = (
             self.get_parameter("image_topic").get_parameter_value().string_value
+            #"/rgbd_camera/image"
         )
         self.get_logger().info(f"Image topic: {image_topic}")
 
@@ -145,11 +173,17 @@ class ArucoNode(rclpy.node.Node):
         self.intrinsic_mat = None
         self.distortion = None
 
-        self.aruco_dictionary = cv2.aruco.Dictionary_get(dictionary_id)
-        self.aruco_parameters = cv2.aruco.DetectorParameters_create()
+        self.aruco_dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+        self.aruco_parameters = cv2.aruco.DetectorParameters()
+        self.detector = cv2.aruco.ArucoDetector(self.aruco_dictionary, self.aruco_parameters)
         self.bridge = CvBridge()
 
+        # Overwrite to info_msg = None -- THIS IS A TEMPORARY, HACKY MESS. REPLACE WHEN POSSIBLE
+        self.overwrite_header_frame_id = "0"
+
     def info_callback(self, info_msg):
+        self.get_logger().warn("Info callback!")
+        self.get_logger().warn(info_msg)
         self.info_msg = info_msg
         self.intrinsic_mat = np.reshape(np.array(self.info_msg.k), (3, 3))
         self.distortion = np.array(self.info_msg.d)
@@ -157,33 +191,44 @@ class ArucoNode(rclpy.node.Node):
         self.destroy_subscription(self.info_sub)
 
     def image_callback(self, img_msg):
-        if self.info_msg is None:
-            self.get_logger().warn("No camera info has been received!")
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="mono8")
+            self.overwrite_header_frame_id = str(int(self.overwrite_header_frame_id)+1)
+            #self.get_logger().warn("Overwrite sucessful")
+        except Exception as e:
+            self.get_logger().warn("Bridge collapse: "+str(e))
             return
+        #if self.info_msg is None:
+         #   self.get_logger().warn("No camera info has been received!")
+          #  return
 
         cv_image = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="mono8")
         markers = ArucoMarkers()
         pose_array = PoseArray()
         if self.camera_frame == "":
-            markers.header.frame_id = self.info_msg.header.frame_id
-            pose_array.header.frame_id = self.info_msg.header.frame_id
+            markers.header.frame_id = self.overwrite_header_frame_id #self.info_msg.header.frame_id
+            pose_array.header.frame_id = self.overwrite_header_frame_id #self.info_msg.header.frame_id
         else:
             markers.header.frame_id = self.camera_frame
             pose_array.header.frame_id = self.camera_frame
 
         markers.header.stamp = img_msg.header.stamp
         pose_array.header.stamp = img_msg.header.stamp
-
-        corners, marker_ids, rejected = cv2.aruco.detectMarkers(
-            cv_image, self.aruco_dictionary, parameters=self.aruco_parameters
+        
+        corners, marker_ids, rejected = self.detector.detectMarkers(
+            cv_image#, self.aruco_dictionary, parameters=self.aruco_parameters
         )
         if marker_ids is not None:
+            self.get_logger().info("corners: "+str(type(corners)))
+            self.get_logger().info("marker_size: "+str(type(self.marker_size)))
+            self.get_logger().info("intrinsic_mat: "+str(type(self.intrinsic_mat)))
+            self.get_logger().info("distortion: "+str(type(self.distortion)))
             if cv2.__version__ > "4.0.0":
-                rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                rvecs, tvecs, _ = my_estimatePoseSingleMarkers(
                     corners, self.marker_size, self.intrinsic_mat, self.distortion
                 )
             else:
-                rvecs, tvecs = cv2.aruco.estimatePoseSingleMarkers(
+                rvecs, tvecs = my_estimatePoseSingleMarkers(
                     corners, self.marker_size, self.intrinsic_mat, self.distortion
                 )
             for i, marker_id in enumerate(marker_ids):
